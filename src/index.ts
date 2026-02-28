@@ -355,6 +355,97 @@ app.get("/", (_req, res) => {
   });
 });
 
+// ── REST API (for OpenClaw / curl) ───────────────────────
+// These are simple HTTP endpoints the OpenClaw skill can call
+
+app.use(express.json({ limit: "20mb" }));
+
+app.post("/api/add-car", async (req, res) => {
+  try {
+    const { image_base64, media_type, make, model } = req.body;
+    if (!image_base64) {
+      return res.status(400).json({ error: "image_base64 is required" });
+    }
+
+    console.log(`[REST] add-car (${(image_base64.length / 1024).toFixed(0)}KB)`);
+
+    const analysis = await analyzeCar(image_base64, media_type || "image/jpeg", make, model);
+    console.log(`[REST] Identified: ${analysis.make} ${analysis.model}`);
+
+    const result = await uploadCar(image_base64, analysis);
+    console.log(`[REST] ✅ Uploaded: ${result.make} ${result.model} (ID: ${result.id})`);
+
+    res.json({
+      success: true,
+      make: analysis.make,
+      model: analysis.model,
+      year_era: analysis.year_era,
+      body_style: analysis.body_style,
+      class: analysis.class,
+      origin: analysis.origin,
+      hints: analysis.hints.map((h: any, i: number) => `Hint ${i + 1}: ${h.description} (${h.zoom}×)`),
+      distractors: analysis.distractors.map((d: any) => `${d.make} ${d.model}`),
+      image_url: result.imageUrl,
+    });
+  } catch (err: any) {
+    console.error(`[REST] add-car error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/list-cars", async (_req, res) => {
+  try {
+    const { data: cars, error } = await supabase
+      .from("cars")
+      .select("id, make, model, image_url, active")
+      .order("created_at", { ascending: false });
+
+    if (error) throw new Error(error.message);
+
+    res.json({
+      count: cars?.length || 0,
+      cars: (cars || []).map((c: any) => ({
+        id: c.id, make: c.make, model: c.model,
+        active: c.active, image_url: c.image_url,
+      })),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/remove-car", async (req, res) => {
+  try {
+    const { make, model } = req.body;
+    if (!make || !model) {
+      return res.status(400).json({ error: "make and model are required" });
+    }
+
+    const { data: cars, error: findError } = await supabase
+      .from("cars")
+      .select("id, image_url")
+      .ilike("make", make)
+      .ilike("model", model);
+
+    if (findError) throw new Error(findError.message);
+    if (!cars || cars.length === 0) {
+      return res.json({ success: false, message: `No car found matching "${make} ${model}"` });
+    }
+
+    for (const car of cars) {
+      if (car.image_url) {
+        const path = car.image_url.split("/car-images/")[1];
+        if (path) await supabase.storage.from("car-images").remove([path]);
+      }
+      await supabase.from("cars").delete().eq("id", car.id);
+    }
+
+    res.json({ success: true, removed: cars.length, make, model });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚗 CarSpotter MCP Server running on port ${PORT}`);
   console.log(`   MCP endpoint: http://localhost:${PORT}/mcp`);
